@@ -31,6 +31,6 @@
   "VehicleModelNameOffset": "0",
   "VehicleNameLen": "24",
   "VehiclePosOffset": "90",
-  "VehicleText": "In a {model} \u2022 {speed} mph",
+  "VehicleText": "In a {model} • {speed} mph",
   "JoinSeparator": "  |  "
 }
