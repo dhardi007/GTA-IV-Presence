@@ -41,7 +41,5 @@
   "PlayerPedPtrOffset": "14c6998",
   "PlayerPedPtrOffsets": "14c6998,14cfba8,14cfbbc,14cfbc8,14c69ac,14c69b8,14cac94,14c9a88,14bcaa8",
   "DriverPedOffset": "50",
-  "PedHealthField": "119d06c",
-  "HealthMatchTolerance": "1000.0",
   "WeaponText": "Weapon: {weapon} ({ammo} ammo)"
 }
