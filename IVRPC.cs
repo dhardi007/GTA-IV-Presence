@@ -31,6 +31,14 @@ namespace IVRPC
         public int MoneyOffset = 0xeb7760;
         public bool MoneyEnabled = true;
         public string MoneyText = "Dinero: ${m}";
+        public int MissionOffset = 0x119af24;
+        public bool MissionEnabled = true;
+        public string MissionActiveText = "En mision";
+        public string MissionFreeText = "Libre";
+        public int VehicleOffset = 0xeb901c;
+        public bool VehicleEnabled = true;
+        public string VehicleInText = "En vehiculo";
+        public string VehicleFootText = "A pie";
         public string JoinSeparator = " | ";
     }
 
@@ -125,6 +133,8 @@ namespace IVRPC
         static int lastWanted = -2;
         static float lastHealth = float.NaN;
         static float lastMoney = float.NaN;
+        static int lastMission = -2;
+        static int lastVehicle = -2;
         static bool areFledged = false;
 
         static string JsonEsc(string s)
@@ -335,6 +345,10 @@ namespace IVRPC
             if (areFledged && cfg.HealthEnabled) health = GameData.ReadFloat(cfg.HealthOffset);
             float money = float.NaN;
             if (areFledged && cfg.MoneyEnabled) money = GameData.ReadFloat(cfg.MoneyOffset);
+            int mission = -1;
+            if (areFledged && cfg.MissionEnabled) mission = GameData.ReadInt(cfg.MissionOffset);
+            int vehicle = -1;
+            if (areFledged && cfg.VehicleEnabled) vehicle = GameData.ReadInt(cfg.VehicleOffset);
             bool changed = (want != lastWanted);
             float lastH = lastHealth;
             bool healthChanged = !(float.IsNaN(health) && float.IsNaN(lastH)) &&
@@ -342,10 +356,14 @@ namespace IVRPC
             float lastM = lastMoney;
             bool moneyChanged = !(float.IsNaN(money) && float.IsNaN(lastM)) &&
                                 (float.IsNaN(money) || float.IsNaN(lastM) || Math.Abs((double)(money - lastM)) > 0.01);
-            if (!changed && !healthChanged && !moneyChanged) return;
+            bool missionChanged = (mission != lastMission);
+            bool vehicleChanged = (vehicle != lastVehicle);
+            if (!changed && !healthChanged && !moneyChanged && !missionChanged && !vehicleChanged) return;
             lastWanted = want;
             lastHealth = health;
             lastMoney = money;
+            lastMission = mission;
+            lastVehicle = vehicle;
             StringBuilder parts = new StringBuilder();
             if (want > 0 && cfg.WantedText.Length > 0)
                 parts.Append(cfg.WantedText.Replace("{n}", want.ToString()).Replace("{s}", want > 1 ? "s" : ""));
@@ -367,7 +385,23 @@ namespace IVRPC
                     parts.Append(cfg.JoinSeparator);
                 parts.Append(line);
             }
-            else if (want < 0 && cfg.State.Length > 0 && parts.Length == 0)
+            if (mission >= 0)
+            {
+                string line = (mission == 4 || mission > 2) ? cfg.MissionActiveText :
+                              (cfg.MissionFreeText.Length > 0 ? cfg.MissionFreeText : "");
+                if (parts.Length > 0 && line.Length > 0 && cfg.JoinSeparator.Length > 0)
+                    parts.Append(cfg.JoinSeparator);
+                parts.Append(line);
+            }
+            if (vehicle >= 0)
+            {
+                string line = (vehicle == 7) ? cfg.VehicleInText :
+                              (cfg.VehicleFootText.Length > 0 ? cfg.VehicleFootText : "");
+                if (parts.Length > 0 && line.Length > 0 && cfg.JoinSeparator.Length > 0)
+                    parts.Append(cfg.JoinSeparator);
+                parts.Append(line);
+            }
+            if (want < 0 && cfg.State.Length > 0 && parts.Length == 0)
             {
                 parts.Append(cfg.State);
             }
@@ -377,7 +411,8 @@ namespace IVRPC
             SetPresence(startSec);
             Console.WriteLine("[OK] " + DateTime.Now.ToString("HH:mm:ss") + " Wanted=" + want +
                               " Health=" + (float.IsNaN(health) ? "n/a" : health.ToString("0.0")) +
-                              " Money=" + (float.IsNaN(money) ? "n/a" : money.ToString("0")) + " -> " + state);
+                              " Money=" + (float.IsNaN(money) ? "n/a" : money.ToString("0")) +
+                              " Mission=" + mission + " Vehicle=" + vehicle + " -> " + state);
         }
 
         static int GamePid()
@@ -437,6 +472,20 @@ namespace IVRPC
                 string me = JsonGet(json, "MoneyEnabled", cfg.MoneyEnabled ? "1" : "0");
                 cfg.MoneyEnabled = me == "1" || me.Equals("true", StringComparison.OrdinalIgnoreCase);
                 cfg.MoneyText     = JsonGet(json, "MoneyText", cfg.MoneyText);
+                int mioff = 0;
+                if (int.TryParse(JsonGet(json, "MissionOffset", cfg.MissionOffset.ToString("x")), System.Globalization.NumberStyles.HexNumber, CultureInfo.InvariantCulture, out mioff) && mioff != 0)
+                    cfg.MissionOffset = mioff;
+                string mien = JsonGet(json, "MissionEnabled", cfg.MissionEnabled ? "1" : "0");
+                cfg.MissionEnabled = mien == "1" || mien.Equals("true", StringComparison.OrdinalIgnoreCase);
+                cfg.MissionActiveText = JsonGet(json, "MissionActiveText", cfg.MissionActiveText);
+                cfg.MissionFreeText   = JsonGet(json, "MissionFreeText", cfg.MissionFreeText);
+                int veh = 0;
+                if (int.TryParse(JsonGet(json, "VehicleOffset", cfg.VehicleOffset.ToString("x")), System.Globalization.NumberStyles.HexNumber, CultureInfo.InvariantCulture, out veh) && veh != 0)
+                    cfg.VehicleOffset = veh;
+                string ven = JsonGet(json, "VehicleEnabled", cfg.VehicleEnabled ? "1" : "0");
+                cfg.VehicleEnabled = ven == "1" || ven.Equals("true", StringComparison.OrdinalIgnoreCase);
+                cfg.VehicleInText   = JsonGet(json, "VehicleInText", cfg.VehicleInText);
+                cfg.VehicleFootText = JsonGet(json, "VehicleFootText", cfg.VehicleFootText);
                 cfg.JoinSeparator  = JsonGet(json, "JoinSeparator", cfg.JoinSeparator);
             }
             catch (Exception ex)
@@ -529,7 +578,8 @@ namespace IVRPC
                         if (inGame && !wasInGame)
                         {
                             int pid = GamePid();
-                            bool attached = cfg.WantedEnabled && pid != 0 && GameData.Attach(pid);
+                            bool attached = pid != 0 && GameData.Attach(pid) &&
+                                (cfg.WantedEnabled || cfg.HealthEnabled || cfg.MoneyEnabled || cfg.MissionEnabled || cfg.VehicleEnabled);
                             if (attached)
                             {
                                 Console.WriteLine("[OK] " + DateTime.Now.ToString("HH:mm:ss") + " Memoria de GTAIV leida (pid " + pid + ", base " + GameData.Base().ToString("x") + ").");
@@ -537,6 +587,9 @@ namespace IVRPC
                             areFledged = attached;
                             lastWanted = -2;
                             lastHealth = float.NaN;
+                            lastMoney = float.NaN;
+                            lastMission = -2;
+                            lastVehicle = -2;
                             startSec = ((DateTimeOffset)DateTime.UtcNow).ToUnixTimeSeconds();
                             wasInGame = true;
                             RefreshPresence();
@@ -553,6 +606,9 @@ namespace IVRPC
                             wasInGame = false;
                             lastWanted = -2;
                             lastHealth = float.NaN;
+                            lastMoney = float.NaN;
+                            lastMission = -2;
+                            lastVehicle = -2;
                             Console.WriteLine("[OK] " + DateTime.Now.ToString("HH:mm:ss") + " GTA IV cerrado -> presencia limpia.");
                         }
                     }

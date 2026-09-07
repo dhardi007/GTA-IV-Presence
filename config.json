@@ -18,5 +18,13 @@
   "MoneyEnabled": true,
   "MoneyOffset": "eb7760",
   "MoneyText": "Cash: ${m}",
+  "MissionEnabled": true,
+  "MissionOffset": "119af24",
+  "MissionActiveText": "In a mission",
+  "MissionFreeText": "Free roam",
+  "VehicleEnabled": true,
+  "VehicleOffset": "eb901c",
+  "VehicleInText": "In a vehicle",
+  "VehicleFootText": "On foot",
   "JoinSeparator": "  |  "
 }
