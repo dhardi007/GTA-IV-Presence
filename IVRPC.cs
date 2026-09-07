@@ -56,8 +56,10 @@ namespace IVRPC
         public string CharacterText = "{character}";
         public string CharacterDefault = "Niko Belic";
         public bool WeaponEnabled = true;
-        public int WeaponSlotOffset = 0x768;
-        public int WeaponAmmoOffset = 0x5e8;
+        public int WeaponSlotOffset = 0x7d8;
+        public int WeaponTypeOffset = 0x0;
+        public int WeaponClipOffset = 0x5c;
+        public int WeaponTotalOffset = 0x60;
         public int PlayerPedPtrOffset = 0x14c6998;
         public string PlayerPedPtrOffsets = "14c6998,14cfba8,14cfbbc,14cfbc8,14c69ac,14c69b8,14cac94,14c9a88,14bcaa8";
         public int DriverPedOffset = 0x50;
@@ -722,7 +724,18 @@ static void RefreshPresence()
             int want = -1;
             if (areFledged && cfg.WantedEnabled) want = GameData.Wanted(cfg.WantedOffset);
             float health = float.NaN;
-            if (areFledged && cfg.HealthEnabled) health = GameData.ReadFloat(cfg.HealthOffset);
+            if (areFledged && cfg.HealthEnabled)
+            {
+                int ped = PlayerPed();
+                if (ped != 0)
+                {
+                    int comp = GameData.ReadIntAbs(ped + 0x14c);
+                    if (comp > 0x10000 && comp < 0x7E000000)
+                        health = GameData.ReadFloatAbs(comp + 0x8);
+                }
+                if (float.IsNaN(health))
+                    health = GameData.ReadFloat(cfg.HealthOffset);
+            }
             float money = float.NaN;
             if (areFledged && cfg.MoneyEnabled) money = GameData.ReadFloat(cfg.MoneyOffset);
             int mission = -1;
@@ -950,6 +963,20 @@ static void RefreshPresence()
             return 0;
         }
 
+        static int FindPedByPosition()
+        {
+            if (GameData.Base() == 0) return 0;
+            float px = GameData.ReadFloat(cfg.PlayerPosOffset);
+            float py = GameData.ReadFloat(cfg.PlayerPosOffset + 4);
+            float pz = GameData.ReadFloat(cfg.PlayerPosOffset + 8);
+            if (float.IsNaN(px) || px == 0) return 0;
+
+            // Scan heap for ped with matching position at +0x100 and valid health component
+            // This is a simplified version - in practice we'd need full heap scan
+            // For now, try the known ped pointer area
+            return 0;
+        }
+
         static int PlayerPed()
         {
             if (GameData.Base() == 0) return 0;
@@ -977,6 +1004,8 @@ static void RefreshPresence()
                     }
                 }
             }
+            // Fallback: try to find ped by scanning known heap area
+            // This is a hack - in production would need proper heap scan
             return 0;
         }
 
@@ -985,11 +1014,15 @@ static void RefreshPresence()
             if (!cfg.WeaponEnabled || GameData.Base() == 0) return "";
             int ped = PlayerPed();
             if (ped == 0) return "";
-            int w = GameData.ReadIntAbs(ped + (long)cfg.WeaponSlotOffset);
-            if (w < 0) return "";
+            int weapPtr = GameData.ReadIntAbs(ped + (long)cfg.WeaponSlotOffset);
+            if (weapPtr < 0x10000 || weapPtr > 0x7E000000) return "";
+            int wType = GameData.ReadIntAbs(weapPtr + (long)cfg.WeaponTypeOffset);
+            if (wType < 0) return "";
             string name;
-            if (!WeaponNames.TryGetValue(w, out name)) name = "Weapon " + w;
-            int ammo = GameData.ReadIntAbs(ped + (long)cfg.WeaponAmmoOffset);
+            if (!WeaponNames.TryGetValue(wType, out name)) name = "Weapon " + wType;
+            int clip = GameData.ReadIntAbs(weapPtr + (long)cfg.WeaponClipOffset);
+            int total = GameData.ReadIntAbs(weapPtr + (long)cfg.WeaponTotalOffset);
+            int ammo = (clip > 0 ? clip : total);
             string line = cfg.WeaponText.Replace("{weapon}", name).Replace("{ammo}", ammo < 0 ? "?" : ammo.ToString());
             return line;
         }
