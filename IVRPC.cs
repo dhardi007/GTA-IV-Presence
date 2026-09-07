@@ -376,9 +376,21 @@ namespace IVRPC
             if (raw == null) return "";
             string up = raw.Trim().ToUpperInvariant();
             if (up.Length == 0) return "";
-            string t = up.Substring(0, 1) + up.Substring(1).ToLowerInvariant();
-            return t;
+            string full;
+            if (ModelNames.TryGetValue(up, out full)) return full;
+            return up.Substring(0, 1) + up.Substring(1).ToLowerInvariant();
         }
+
+        static readonly System.Collections.Generic.Dictionary<string, string> ModelNames =
+            new System.Collections.Generic.Dictionary<string, string>
+            {
+                { "CAVCADE", "Cavalcade" },
+                { "COGNOS", "Cognoscenti" },
+                { "DILETT", "Dilletante" },
+                { "FEROCI", "Feroci" },
+                { "ESPERANT", "Esperant" },
+                { "VEH_POLICE_OLD", "Police Cruiser" },
+            };
 
         static void RefreshPresence()
         {
