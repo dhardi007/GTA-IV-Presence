@@ -7,6 +7,8 @@ using System.Globalization;
 using System.Net.WebSockets;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace IVRPC
 {
@@ -80,25 +82,47 @@ namespace IVRPC
         }
     }
 
-    class Native
-    {
-        public const uint PROCESS_VM_READ = 0x0010;
-        public const uint PROCESS_QUERY_INFORMATION = 0x0400;
+class Native
+        {
+            public const uint PROCESS_VM_READ = 0x0010;
+            public const uint PROCESS_QUERY_INFORMATION = 0x0400;
+            public const uint MEM_COMMIT = 0x1000;
+            public const uint MEM_PRIVATE = 0x20000;
+            public const uint MEM_MAPPED = 0x40000;
+            public const uint PAGE_READWRITE = 0x04;
+            public const uint PAGE_WRITECOPY = 0x08;
+            public const uint PAGE_EXECUTE_READ = 0x20;
+            public const uint PAGE_EXECUTE_READWRITE = 0x40;
 
-        [DllImport("kernel32.dll", SetLastError = true)]
-        public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
-        [DllImport("kernel32.dll")]
-        public static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int size, out IntPtr read);
-        [DllImport("kernel32.dll")]
-        public static extern bool CloseHandle(IntPtr h);
-        [DllImport("ntdll.dll")]
-        public static extern int NtQueryInformationProcess(IntPtr h, int cls, out IntPtr outBuf, int size, IntPtr retLen);
-    }
+            [DllImport("kernel32.dll", SetLastError = true)]
+            public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+            [DllImport("kernel32.dll")]
+            public static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int size, out IntPtr read);
+            [DllImport("kernel32.dll")]
+            public static extern bool CloseHandle(IntPtr h);
+            [DllImport("ntdll.dll")]
+            public static extern int NtQueryInformationProcess(IntPtr h, int cls, out IntPtr outBuf, int size, IntPtr retLen);
+            [DllImport("kernel32.dll")]
+            public static extern int VirtualQueryEx(IntPtr hProcess, IntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, int dwLength);
+
+            [StructLayout(LayoutKind.Sequential)]
+            public struct MEMORY_BASIC_INFORMATION
+            {
+                public IntPtr BaseAddress;
+                public IntPtr AllocationBase;
+                public uint AllocationProtect;
+                public IntPtr RegionSize;
+                public uint State;
+                public uint Protect;
+                public uint Type;
+            }
+        }
 
     class GameData
     {
-        static IntPtr hProc = IntPtr.Zero;
+        public static IntPtr hProc = IntPtr.Zero;
         static int gameBase = 0;
+        public static float lastReadPosX = 0, lastReadPosY = 0, lastReadPosZ = 0;
 
         public static bool Attach(int pid)
         {
@@ -143,7 +167,11 @@ namespace IVRPC
             long addr = gameBase + (long)relative;
             byte[] b = ReadAnon(addr, 4);
             if (b == null) return float.NaN;
-            return BitConverter.ToSingle(b, 0);
+            float val = BitConverter.ToSingle(b, 0);
+            if (relative == 0xd736b0) lastReadPosX = val;
+            else if (relative == 0xd736b4) lastReadPosY = val;
+            else if (relative == 0xd736b8) lastReadPosZ = val;
+            return val;
         }
 
         public static int ReadIntAbs(long addr)
@@ -965,17 +993,95 @@ static void RefreshPresence()
 
         static int FindPedByPosition()
         {
-            if (GameData.Base() == 0) return 0;
+            if (GameData.Base() == 0 || GameData.hProc == IntPtr.Zero) return 0;
             float px = GameData.ReadFloat(cfg.PlayerPosOffset);
             float py = GameData.ReadFloat(cfg.PlayerPosOffset + 4);
             float pz = GameData.ReadFloat(cfg.PlayerPosOffset + 8);
             if (float.IsNaN(px) || px == 0) return 0;
 
-            // Scan heap for ped with matching position at +0x100 and valid health component
-            // This is a simplified version - in practice we'd need full heap scan
-            // For now, try the known ped pointer area
+            int baseAddr = GameData.Base();
+            int textStart = baseAddr + 0x1000;
+            int textEnd = baseAddr + 0xA73000; // .text section end
+            int pedHealthCompOff = 0x14c;
+            int pedPosOff = 0x100;
+            int pedVtOff = 0;
+
+            // Scan heap regions for ped
+            IntPtr addr = (IntPtr)0x10000;
+            while (addr.ToInt64() < 0x7E000000)
+            {
+                Native.MEMORY_BASIC_INFORMATION mbi;
+                int result = Native.VirtualQueryEx(GameData.hProc, addr, out mbi, System.Runtime.InteropServices.Marshal.SizeOf(typeof(Native.MEMORY_BASIC_INFORMATION)));
+                if (result == 0) break;
+
+                long regionStart = mbi.BaseAddress.ToInt64();
+                long regionSize = mbi.RegionSize.ToInt64();
+                long regionEnd = regionStart + regionSize;
+
+                if (mbi.State == Native.MEM_COMMIT && 
+                    (mbi.Type == Native.MEM_PRIVATE || mbi.Type == Native.MEM_MAPPED) &&
+                    regionSize >= 4096 &&
+                    regionStart >= 0x100000 && regionStart < 0x30000000)
+                {
+                    int ped = ScanRegionForPed(GameData.hProc, regionStart, regionSize, px, py, pz, baseAddr, textStart, textEnd, pedVtOff, pedPosOff, pedHealthCompOff);
+                    if (ped != 0) return ped;
+                }
+
+                addr = (IntPtr)regionEnd;
+            }
             return 0;
         }
+
+        static int ScanRegionForPed(IntPtr hProc, long regionStart, long regionSize, float px, float py, float pz, int baseAddr, int textStart, int textEnd, int vtOff, int posOff, int healthCompOff)
+        {
+            const int CHUNK = 65536;
+            byte[] buffer = new byte[CHUNK];
+            IntPtr bytesRead;
+
+            for (long offset = 0; offset < regionSize; offset += CHUNK)
+            {
+                int readSize = (int)Math.Min(CHUNK, regionSize - offset);
+                IntPtr readAddr = (IntPtr)(regionStart + offset);
+                if (!Native.ReadProcessMemory(hProc, readAddr, buffer, readSize, out bytesRead))
+                    continue;
+                if (bytesRead.ToInt64() < 4) continue;
+
+                // Scan for potential ped structures (aligned to 16 bytes)
+                for (int i = 0; i <= bytesRead.ToInt64() - 0x150; i += 16)
+                {
+                    int vt = BitConverter.ToInt32(buffer, i + 0);
+                    if (vt < 0x331000 || vt >= baseAddr + 0x2000000) continue;
+
+                    // Check vtable[0] points to .text
+                    byte[] vtBuf = new byte[4];
+                    if (!Native.ReadProcessMemory(hProc, (IntPtr)vt, vtBuf, 4, out _)) continue;
+                    int vt0 = BitConverter.ToInt32(vtBuf, 0);
+                    if (vt0 < 0x331000 || vt0 >= baseAddr + 0xA73000) continue;
+
+                    // Check position at +0x100
+                    float x = BitConverter.ToSingle(buffer, i + posOff);
+                    float y = BitConverter.ToSingle(buffer, i + posOff + 4);
+                    float z = BitConverter.ToSingle(buffer, i + posOff + 8);
+                    if (!IsValidCoord(x) || !IsValidCoord(y) || !IsValidCoord(z)) continue;
+                    if (Math.Abs(x - GameData.lastReadPosX) > 2.0f || Math.Abs(y - GameData.lastReadPosY) > 2.0f || Math.Abs(z - GameData.lastReadPosZ) > 2.0f) continue;
+
+                    // Check health component at +0x14c
+                    int comp = BitConverter.ToInt32(buffer, i + 0x14c);
+                    if (comp < 0x100000 || comp > 0x70000000) continue;
+                    byte[] compBuf = new byte[0x30];
+                    if (!Native.ReadProcessMemory(hProc, (IntPtr)comp, compBuf, compBuf.Length, out _)) continue;
+                    float hp = BitConverter.ToSingle(compBuf, 0x8);
+                    if (!IsValidHealth(hp)) continue;
+
+                    // Valid ped found!
+                    return (int)(regionStart + offset + i);
+                }
+            }
+            return 0;
+        }
+
+        static bool IsValidCoord(float v) { return !float.IsNaN(v) && !float.IsInfinity(v) && Math.Abs(v) < 10000; }
+        static bool IsValidHealth(float v) { return v >= 50 && v <= 200; }
 
         static int PlayerPed()
         {
@@ -1004,8 +1110,9 @@ static void RefreshPresence()
                     }
                 }
             }
-            // Fallback: try to find ped by scanning known heap area
-            // This is a hack - in production would need proper heap scan
+            // Fallback: dynamic heap scan for ped by position + health component
+            int ped = FindPedByPosition();
+            if (ped != 0) return ped;
             return 0;
         }
 
