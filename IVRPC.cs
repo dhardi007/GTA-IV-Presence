@@ -6,6 +6,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net.WebSockets;
 using System.Threading.Tasks;
+using System.Runtime.InteropServices;
 
 namespace IVRPC
 {
@@ -20,6 +21,94 @@ namespace IVRPC
         public string LargeImageText = "Grand Theft Auto IV";
         public string SmallImageKey = "";
         public string SmallImageText = "";
+        public int WantedOffset = 0xebd0d0;
+        public bool WantedEnabled = true;
+        public string WantedText = "Busqueda: {n} estrella{s}";
+        public string WantedZeroText = "Sin busqueda";
+        public int HealthOffset = 0x119d06c;
+        public bool HealthEnabled = true;
+        public string HealthText = "Salud: {h}%";
+        public int MoneyOffset = 0xeb7760;
+        public bool MoneyEnabled = true;
+        public string MoneyText = "Dinero: ${m}";
+        public string JoinSeparator = " | ";
+    }
+
+    class Native
+    {
+        public const uint PROCESS_VM_READ = 0x0010;
+        public const uint PROCESS_QUERY_INFORMATION = 0x0400;
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [DllImport("kernel32.dll")]
+        public static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int size, out IntPtr read);
+        [DllImport("kernel32.dll")]
+        public static extern bool CloseHandle(IntPtr h);
+        [DllImport("ntdll.dll")]
+        public static extern int NtQueryInformationProcess(IntPtr h, int cls, out IntPtr outBuf, int size, IntPtr retLen);
+    }
+
+    class GameData
+    {
+        static IntPtr hProc = IntPtr.Zero;
+        static int gameBase = 0;
+
+        public static bool Attach(int pid)
+        {
+            Detach();
+            hProc = Native.OpenProcess(Native.PROCESS_VM_READ | Native.PROCESS_QUERY_INFORMATION, false, pid);
+            if (hProc == IntPtr.Zero) return false;
+            IntPtr peb;
+            if (Native.NtQueryInformationProcess(hProc, 26, out peb, IntPtr.Size, IntPtr.Zero) != 0) return false;
+            byte[] b = ReadAnon(peb.ToInt64() + 8, 4);
+            if (b == null || b.Length < 4) return false;
+            gameBase = BitConverter.ToInt32(b, 0);
+            return gameBase != 0;
+        }
+
+        public static void Detach()
+        {
+            if (hProc != IntPtr.Zero) { Native.CloseHandle(hProc); hProc = IntPtr.Zero; }
+        }
+
+        static byte[] ReadAnon(long addr, int size)
+        {
+            if (hProc == IntPtr.Zero) return null;
+            byte[] buf = new byte[size];
+            IntPtr rd;
+            if (!Native.ReadProcessMemory(hProc, new IntPtr(addr), buf, size, out rd)) return null;
+            if (rd.ToInt64() != size) return null;
+            return buf;
+        }
+
+        public static int ReadInt(int relative)
+        {
+            if (gameBase == 0) return -1;
+            long addr = gameBase + (long)relative;
+            byte[] b = ReadAnon(addr, 4);
+            if (b == null) return -1;
+            return BitConverter.ToInt32(b, 0);
+        }
+
+        public static float ReadFloat(int relative)
+        {
+            if (gameBase == 0) return float.NaN;
+            long addr = gameBase + (long)relative;
+            byte[] b = ReadAnon(addr, 4);
+            if (b == null) return float.NaN;
+            return BitConverter.ToSingle(b, 0);
+        }
+
+        public static int Base()
+        {
+            return gameBase;
+        }
+
+        public static int Wanted(int offset)
+        {
+            return ReadInt(offset);
+        }
     }
 
     class Program
@@ -32,6 +121,11 @@ namespace IVRPC
         static bool wasInGame = false;
         static string lastMsg = "";
         static int procId = Process.GetCurrentProcess().Id;
+        static long startSec = 0;
+        static int lastWanted = -2;
+        static float lastHealth = float.NaN;
+        static float lastMoney = float.NaN;
+        static bool areFledged = false;
 
         static string JsonEsc(string s)
         {
@@ -233,18 +327,77 @@ namespace IVRPC
             SendCommand("SET_ACTIVITY", args);
         }
 
-        static bool GameRunning()
+        static void RefreshPresence()
+        {
+            int want = -1;
+            if (areFledged && cfg.WantedEnabled) want = GameData.Wanted(cfg.WantedOffset);
+            float health = float.NaN;
+            if (areFledged && cfg.HealthEnabled) health = GameData.ReadFloat(cfg.HealthOffset);
+            float money = float.NaN;
+            if (areFledged && cfg.MoneyEnabled) money = GameData.ReadFloat(cfg.MoneyOffset);
+            bool changed = (want != lastWanted);
+            float lastH = lastHealth;
+            bool healthChanged = !(float.IsNaN(health) && float.IsNaN(lastH)) &&
+                                 (float.IsNaN(health) || float.IsNaN(lastH) || Math.Abs((double)(health - lastH)) > 0.3);
+            float lastM = lastMoney;
+            bool moneyChanged = !(float.IsNaN(money) && float.IsNaN(lastM)) &&
+                                (float.IsNaN(money) || float.IsNaN(lastM) || Math.Abs((double)(money - lastM)) > 0.01);
+            if (!changed && !healthChanged && !moneyChanged) return;
+            lastWanted = want;
+            lastHealth = health;
+            lastMoney = money;
+            StringBuilder parts = new StringBuilder();
+            if (want > 0 && cfg.WantedText.Length > 0)
+                parts.Append(cfg.WantedText.Replace("{n}", want.ToString()).Replace("{s}", want > 1 ? "s" : ""));
+            else if (cfg.WantedZeroText.Length > 0)
+                parts.Append(cfg.WantedZeroText);
+            if (!float.IsNaN(health) && health >= 0 && health < 400)
+            {
+                int hp = (int)Math.Round(health);
+                string line = cfg.HealthText.Replace("{h}", hp.ToString());
+                if (parts.Length > 0 && line.Length > 0 && cfg.JoinSeparator.Length > 0)
+                    parts.Append(cfg.JoinSeparator);
+                parts.Append(line);
+            }
+            if (!float.IsNaN(money) && money >= 0 && money < 1e9f)
+            {
+                int mc = (int)Math.Round(money);
+                string line = cfg.MoneyText.Replace("{m}", mc.ToString());
+                if (parts.Length > 0 && line.Length > 0 && cfg.JoinSeparator.Length > 0)
+                    parts.Append(cfg.JoinSeparator);
+                parts.Append(line);
+            }
+            else if (want < 0 && cfg.State.Length > 0 && parts.Length == 0)
+            {
+                parts.Append(cfg.State);
+            }
+            string state = parts.ToString();
+            if (state.Length == 0) state = cfg.State;
+            cfg.State = state;
+            SetPresence(startSec);
+            Console.WriteLine("[OK] " + DateTime.Now.ToString("HH:mm:ss") + " Wanted=" + want +
+                              " Health=" + (float.IsNaN(health) ? "n/a" : health.ToString("0.0")) +
+                              " Money=" + (float.IsNaN(money) ? "n/a" : money.ToString("0")) + " -> " + state);
+        }
+
+        static int GamePid()
         {
             string[] names = cfg.ProcessNames.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
-            for (int i = 0; i < names.Length; i++)
+            foreach (string n in names)
             {
                 try
                 {
-                    if (Process.GetProcessesByName(names[i].Trim()).Length > 0) return true;
+                    Process[] ps = Process.GetProcessesByName(n.Trim());
+                    if (ps.Length > 0) return ps[0].Id;
                 }
                 catch { }
             }
-            return false;
+            return 0;
+        }
+
+        static bool GameRunning()
+        {
+            return GamePid() != 0;
         }
 
         static void LoadConfig()
@@ -265,6 +418,26 @@ namespace IVRPC
                 int iv = 0;
                 if (int.TryParse(JsonGet(json, "CheckIntervalSeconds", cfg.CheckIntervalSeconds.ToString()), NumberStyles.Integer, CultureInfo.InvariantCulture, out iv) && iv > 0)
                     cfg.CheckIntervalSeconds = iv;
+                int wo = 0;
+                if (int.TryParse(JsonGet(json, "WantedOffset", cfg.WantedOffset.ToString("x")), System.Globalization.NumberStyles.HexNumber, CultureInfo.InvariantCulture, out wo) && wo != 0)
+                    cfg.WantedOffset = wo;
+                string we = JsonGet(json, "WantedEnabled", cfg.WantedEnabled ? "1" : "0");
+                cfg.WantedEnabled = we == "1" || we.Equals("true", StringComparison.OrdinalIgnoreCase);
+                cfg.WantedText     = JsonGet(json, "WantedText", cfg.WantedText);
+                cfg.WantedZeroText = JsonGet(json, "WantedZeroText", cfg.WantedZeroText);
+                int hoff = 0;
+                if (int.TryParse(JsonGet(json, "HealthOffset", cfg.HealthOffset.ToString("x")), System.Globalization.NumberStyles.HexNumber, CultureInfo.InvariantCulture, out hoff) && hoff != 0)
+                    cfg.HealthOffset = hoff;
+                string he = JsonGet(json, "HealthEnabled", cfg.HealthEnabled ? "1" : "0");
+                cfg.HealthEnabled = he == "1" || he.Equals("true", StringComparison.OrdinalIgnoreCase);
+                cfg.HealthText     = JsonGet(json, "HealthText", cfg.HealthText);
+                int moff = 0;
+                if (int.TryParse(JsonGet(json, "MoneyOffset", cfg.MoneyOffset.ToString("x")), System.Globalization.NumberStyles.HexNumber, CultureInfo.InvariantCulture, out moff) && moff != 0)
+                    cfg.MoneyOffset = moff;
+                string me = JsonGet(json, "MoneyEnabled", cfg.MoneyEnabled ? "1" : "0");
+                cfg.MoneyEnabled = me == "1" || me.Equals("true", StringComparison.OrdinalIgnoreCase);
+                cfg.MoneyText     = JsonGet(json, "MoneyText", cfg.MoneyText);
+                cfg.JoinSeparator  = JsonGet(json, "JoinSeparator", cfg.JoinSeparator);
             }
             catch (Exception ex)
             {
@@ -355,14 +528,31 @@ namespace IVRPC
                         bool inGame = GameRunning();
                         if (inGame && !wasInGame)
                         {
-                            SetPresence(((DateTimeOffset)DateTime.UtcNow).ToUnixTimeSeconds());
+                            int pid = GamePid();
+                            bool attached = cfg.WantedEnabled && pid != 0 && GameData.Attach(pid);
+                            if (attached)
+                            {
+                                Console.WriteLine("[OK] " + DateTime.Now.ToString("HH:mm:ss") + " Memoria de GTAIV leida (pid " + pid + ", base " + GameData.Base().ToString("x") + ").");
+                            }
+                            areFledged = attached;
+                            lastWanted = -2;
+                            lastHealth = float.NaN;
+                            startSec = ((DateTimeOffset)DateTime.UtcNow).ToUnixTimeSeconds();
                             wasInGame = true;
+                            RefreshPresence();
                             Console.WriteLine("[OK] " + DateTime.Now.ToString("HH:mm:ss") + " GTA IV detectado -> presencia activada.");
+                        }
+                        else if (inGame && wasInGame)
+                        {
+                            RefreshPresence();
                         }
                         else if (!inGame && wasInGame)
                         {
                             ClearPresence();
+                            GameData.Detach();
                             wasInGame = false;
+                            lastWanted = -2;
+                            lastHealth = float.NaN;
                             Console.WriteLine("[OK] " + DateTime.Now.ToString("HH:mm:ss") + " GTA IV cerrado -> presencia limpia.");
                         }
                     }

@@ -1,2 +1,3 @@
 @echo off
-start "" "%~dp0IVRPC.exe"
+cd /d "%~dp0"
+start "IVRPC" /min IVRPC.exe
