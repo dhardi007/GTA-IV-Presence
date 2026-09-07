@@ -503,9 +503,10 @@ namespace IVRPC
                     stats.Append(cfg.JoinSeparator);
                 stats.Append(line);
             }
-            string state = "";
-            if (parts.Length > 0) state = parts.ToString();
-            if (stats.Length > 0) state = (state.Length > 0 ? state + "\n" : "") + stats.ToString();
+            string situ = parts.ToString();
+            if (situ.Length == 0) situ = cfg.Details;
+            cfg.Details = situ;
+            string state = stats.ToString();
             if (state.Length == 0) state = cfg.State;
             cfg.State = state;
             SetPresence(startSec);
