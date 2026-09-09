@@ -7,8 +7,6 @@ using System.Globalization;
 using System.Net.WebSockets;
 using System.Threading.Tasks;
 using System.Runtime.InteropServices;
-using System.Collections.Generic;
-using System.Linq;
 
 namespace IVRPC
 {
@@ -58,10 +56,8 @@ namespace IVRPC
         public string CharacterText = "{character}";
         public string CharacterDefault = "Niko Belic";
         public bool WeaponEnabled = true;
-        public int WeaponSlotOffset = 0x7d8;
-        public int WeaponTypeOffset = 0x0;
-        public int WeaponClipOffset = 0x5c;
-        public int WeaponTotalOffset = 0x60;
+        public int WeaponSlotOffset = 0x768;
+        public int WeaponAmmoOffset = 0x5e8;
         public int PlayerPedPtrOffset = 0x14c6998;
         public string PlayerPedPtrOffsets = "14c6998,14cfba8,14cfbbc,14cfbc8,14c69ac,14c69b8,14cac94,14c9a88,14bcaa8";
         public int DriverPedOffset = 0x50;
@@ -82,47 +78,25 @@ namespace IVRPC
         }
     }
 
-class Native
-        {
-            public const uint PROCESS_VM_READ = 0x0010;
-            public const uint PROCESS_QUERY_INFORMATION = 0x0400;
-            public const uint MEM_COMMIT = 0x1000;
-            public const uint MEM_PRIVATE = 0x20000;
-            public const uint MEM_MAPPED = 0x40000;
-            public const uint PAGE_READWRITE = 0x04;
-            public const uint PAGE_WRITECOPY = 0x08;
-            public const uint PAGE_EXECUTE_READ = 0x20;
-            public const uint PAGE_EXECUTE_READWRITE = 0x40;
+    class Native
+    {
+        public const uint PROCESS_VM_READ = 0x0010;
+        public const uint PROCESS_QUERY_INFORMATION = 0x0400;
 
-            [DllImport("kernel32.dll", SetLastError = true)]
-            public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
-            [DllImport("kernel32.dll")]
-            public static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int size, out IntPtr read);
-            [DllImport("kernel32.dll")]
-            public static extern bool CloseHandle(IntPtr h);
-            [DllImport("ntdll.dll")]
-            public static extern int NtQueryInformationProcess(IntPtr h, int cls, out IntPtr outBuf, int size, IntPtr retLen);
-            [DllImport("kernel32.dll")]
-            public static extern int VirtualQueryEx(IntPtr hProcess, IntPtr lpAddress, out MEMORY_BASIC_INFORMATION lpBuffer, int dwLength);
-
-            [StructLayout(LayoutKind.Sequential)]
-            public struct MEMORY_BASIC_INFORMATION
-            {
-                public IntPtr BaseAddress;
-                public IntPtr AllocationBase;
-                public uint AllocationProtect;
-                public IntPtr RegionSize;
-                public uint State;
-                public uint Protect;
-                public uint Type;
-            }
-        }
+        [DllImport("kernel32.dll", SetLastError = true)]
+        public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+        [DllImport("kernel32.dll")]
+        public static extern bool ReadProcessMemory(IntPtr h, IntPtr addr, byte[] buf, int size, out IntPtr read);
+        [DllImport("kernel32.dll")]
+        public static extern bool CloseHandle(IntPtr h);
+        [DllImport("ntdll.dll")]
+        public static extern int NtQueryInformationProcess(IntPtr h, int cls, out IntPtr outBuf, int size, IntPtr retLen);
+    }
 
     class GameData
     {
-        public static IntPtr hProc = IntPtr.Zero;
+        static IntPtr hProc = IntPtr.Zero;
         static int gameBase = 0;
-        public static float lastReadPosX = 0, lastReadPosY = 0, lastReadPosZ = 0;
 
         public static bool Attach(int pid)
         {
@@ -167,11 +141,7 @@ class Native
             long addr = gameBase + (long)relative;
             byte[] b = ReadAnon(addr, 4);
             if (b == null) return float.NaN;
-            float val = BitConverter.ToSingle(b, 0);
-            if (relative == 0xd736b0) lastReadPosX = val;
-            else if (relative == 0xd736b4) lastReadPosY = val;
-            else if (relative == 0xd736b8) lastReadPosZ = val;
-            return val;
+            return BitConverter.ToSingle(b, 0);
         }
 
         public static int ReadIntAbs(long addr)
@@ -752,18 +722,7 @@ static void RefreshPresence()
             int want = -1;
             if (areFledged && cfg.WantedEnabled) want = GameData.Wanted(cfg.WantedOffset);
             float health = float.NaN;
-            if (areFledged && cfg.HealthEnabled)
-            {
-                int ped = PlayerPed();
-                if (ped != 0)
-                {
-                    int comp = GameData.ReadIntAbs(ped + 0x14c);
-                    if (comp > 0x10000 && comp < 0x7E000000)
-                        health = GameData.ReadFloatAbs(comp + 0x8);
-                }
-                if (float.IsNaN(health))
-                    health = GameData.ReadFloat(cfg.HealthOffset);
-            }
+            // if (areFledged && cfg.HealthEnabled) health = GameData.ReadFloat(cfg.HealthOffset); // Health desactivado
             float money = float.NaN;
             if (areFledged && cfg.MoneyEnabled) money = GameData.ReadFloat(cfg.MoneyOffset);
             int mission = -1;
@@ -819,7 +778,8 @@ static void RefreshPresence()
             bool zoneChanged = (zoneName != lastZone);
             string missionTitle = MissionTitle();
             bool titleChanged = (missionTitle != lastMissionTitle);
-            string weapon = CurrentWeapon();
+            string weapon = "";
+            // string weapon = CurrentWeapon(); // Weapon desactivado
             bool weaponChanged = (weapon != lastWeapon);
             if (!changed && !healthChanged && !moneyChanged && !missionChanged && !vehicleChanged && !modelChanged && !speedChanged && !zoneChanged && !titleChanged && !weaponChanged) return;
             lastWanted = want;
@@ -838,8 +798,7 @@ static void RefreshPresence()
             if (mission >= 0 && cfg.MissionEnabled)
             {
                 string named = MissionName(missionTitle);
-                string line = (named.Length > 0 && mission > 0) ? named :
-                              (mission == 4 || mission > 2) ? cfg.MissionActiveText :
+                string line = (named.Length > 0) ? named :
                               (cfg.MissionFreeText.Length > 0 ? cfg.MissionFreeText : "");
                 if (parts.Length > 0 && line.Length > 0 && cfg.JoinSeparator.Length > 0)
                     parts.Append(cfg.JoinSeparator);
@@ -854,11 +813,11 @@ static void RefreshPresence()
                     parts.Append(cline);
                 }
             }
-            if (weapon.Length > 0 && cfg.WeaponEnabled)
-            {
-                if (parts.Length > 0 && cfg.JoinSeparator.Length > 0) parts.Append(cfg.JoinSeparator);
-                parts.Append(weapon);
-            }
+            // if (weapon.Length > 0 && cfg.WeaponEnabled) // Weapon desactivado
+            // {
+            //     if (parts.Length > 0 && cfg.JoinSeparator.Length > 0) parts.Append(cfg.JoinSeparator);
+            //     parts.Append(weapon);
+            // }
             string vline = "";
             if (rot && model.Length > 0)
                 vline = cfg.VehicleText.Replace("{model}", model).Replace("{speed}", (speedMph < 0 ? "? " : speedMph.ToString()));
@@ -889,14 +848,14 @@ static void RefreshPresence()
             }
             else if (cfg.WantedZeroText.Length > 0)
                 stats.Append(cfg.WantedZeroText);
-            if (!float.IsNaN(health) && health >= 0 && health < 400)
-            {
-                int hp = (int)Math.Round(health);
-                string line = cfg.HealthText.Replace("{h}", hp.ToString());
-                if (stats.Length > 0 && line.Length > 0 && cfg.JoinSeparator.Length > 0)
-                    stats.Append(cfg.JoinSeparator);
-                stats.Append(line);
-            }
+            // if (!float.IsNaN(health) && health >= 0 && health < 400) // Health desactivado
+            // {
+            //     int hp = (int)Math.Round(health);
+            //     string line = cfg.HealthText.Replace("{h}", hp.ToString());
+            //     if (stats.Length > 0 && line.Length > 0 && cfg.JoinSeparator.Length > 0)
+            //         stats.Append(cfg.JoinSeparator);
+            //     stats.Append(line);
+            // }
             if (!float.IsNaN(money) && money >= 0 && money < 1e9f)
             {
                 int mc = (int)Math.Round(money);
@@ -991,98 +950,6 @@ static void RefreshPresence()
             return 0;
         }
 
-        static int FindPedByPosition()
-        {
-            if (GameData.Base() == 0 || GameData.hProc == IntPtr.Zero) return 0;
-            float px = GameData.ReadFloat(cfg.PlayerPosOffset);
-            float py = GameData.ReadFloat(cfg.PlayerPosOffset + 4);
-            float pz = GameData.ReadFloat(cfg.PlayerPosOffset + 8);
-            if (float.IsNaN(px) || px == 0) return 0;
-
-            int baseAddr = GameData.Base();
-            int textStart = baseAddr + 0x1000;
-            int textEnd = baseAddr + 0xA73000; // .text section end
-            int pedHealthCompOff = 0x14c;
-            int pedPosOff = 0x100;
-            int pedVtOff = 0;
-
-            // Scan heap regions for ped
-            IntPtr addr = (IntPtr)0x10000;
-            while (addr.ToInt64() < 0x7E000000)
-            {
-                Native.MEMORY_BASIC_INFORMATION mbi;
-                int result = Native.VirtualQueryEx(GameData.hProc, addr, out mbi, System.Runtime.InteropServices.Marshal.SizeOf(typeof(Native.MEMORY_BASIC_INFORMATION)));
-                if (result == 0) break;
-
-                long regionStart = mbi.BaseAddress.ToInt64();
-                long regionSize = mbi.RegionSize.ToInt64();
-                long regionEnd = regionStart + regionSize;
-
-                if (mbi.State == Native.MEM_COMMIT && 
-                    (mbi.Type == Native.MEM_PRIVATE || mbi.Type == Native.MEM_MAPPED) &&
-                    regionSize >= 4096 &&
-                    regionStart >= 0x100000 && regionStart < 0x30000000)
-                {
-                    int ped = ScanRegionForPed(GameData.hProc, regionStart, regionSize, px, py, pz, baseAddr, textStart, textEnd, pedVtOff, pedPosOff, pedHealthCompOff);
-                    if (ped != 0) return ped;
-                }
-
-                addr = (IntPtr)regionEnd;
-            }
-            return 0;
-        }
-
-        static int ScanRegionForPed(IntPtr hProc, long regionStart, long regionSize, float px, float py, float pz, int baseAddr, int textStart, int textEnd, int vtOff, int posOff, int healthCompOff)
-        {
-            const int CHUNK = 65536;
-            byte[] buffer = new byte[CHUNK];
-            IntPtr bytesRead;
-
-            for (long offset = 0; offset < regionSize; offset += CHUNK)
-            {
-                int readSize = (int)Math.Min(CHUNK, regionSize - offset);
-                IntPtr readAddr = (IntPtr)(regionStart + offset);
-                if (!Native.ReadProcessMemory(hProc, readAddr, buffer, readSize, out bytesRead))
-                    continue;
-                if (bytesRead.ToInt64() < 4) continue;
-
-                // Scan for potential ped structures (aligned to 16 bytes)
-                for (int i = 0; i <= bytesRead.ToInt64() - 0x150; i += 16)
-                {
-                    int vt = BitConverter.ToInt32(buffer, i + 0);
-                    if (vt < 0x331000 || vt >= baseAddr + 0x2000000) continue;
-
-                    // Check vtable[0] points to .text
-                    byte[] vtBuf = new byte[4];
-                    if (!Native.ReadProcessMemory(hProc, (IntPtr)vt, vtBuf, 4, out _)) continue;
-                    int vt0 = BitConverter.ToInt32(vtBuf, 0);
-                    if (vt0 < 0x331000 || vt0 >= baseAddr + 0xA73000) continue;
-
-                    // Check position at +0x100
-                    float x = BitConverter.ToSingle(buffer, i + posOff);
-                    float y = BitConverter.ToSingle(buffer, i + posOff + 4);
-                    float z = BitConverter.ToSingle(buffer, i + posOff + 8);
-                    if (!IsValidCoord(x) || !IsValidCoord(y) || !IsValidCoord(z)) continue;
-                    if (Math.Abs(x - GameData.lastReadPosX) > 2.0f || Math.Abs(y - GameData.lastReadPosY) > 2.0f || Math.Abs(z - GameData.lastReadPosZ) > 2.0f) continue;
-
-                    // Check health component at +0x14c
-                    int comp = BitConverter.ToInt32(buffer, i + 0x14c);
-                    if (comp < 0x100000 || comp > 0x70000000) continue;
-                    byte[] compBuf = new byte[0x30];
-                    if (!Native.ReadProcessMemory(hProc, (IntPtr)comp, compBuf, compBuf.Length, out _)) continue;
-                    float hp = BitConverter.ToSingle(compBuf, 0x8);
-                    if (!IsValidHealth(hp)) continue;
-
-                    // Valid ped found!
-                    return (int)(regionStart + offset + i);
-                }
-            }
-            return 0;
-        }
-
-        static bool IsValidCoord(float v) { return !float.IsNaN(v) && !float.IsInfinity(v) && Math.Abs(v) < 10000; }
-        static bool IsValidHealth(float v) { return v >= 50 && v <= 200; }
-
         static int PlayerPed()
         {
             if (GameData.Base() == 0) return 0;
@@ -1110,9 +977,6 @@ static void RefreshPresence()
                     }
                 }
             }
-            // Fallback: dynamic heap scan for ped by position + health component
-            int ped = FindPedByPosition();
-            if (ped != 0) return ped;
             return 0;
         }
 
@@ -1121,15 +985,11 @@ static void RefreshPresence()
             if (!cfg.WeaponEnabled || GameData.Base() == 0) return "";
             int ped = PlayerPed();
             if (ped == 0) return "";
-            int weapPtr = GameData.ReadIntAbs(ped + (long)cfg.WeaponSlotOffset);
-            if (weapPtr < 0x10000 || weapPtr > 0x7E000000) return "";
-            int wType = GameData.ReadIntAbs(weapPtr + (long)cfg.WeaponTypeOffset);
-            if (wType < 0) return "";
+            int w = GameData.ReadIntAbs(ped + (long)cfg.WeaponSlotOffset);
+            if (w < 0) return "";
             string name;
-            if (!WeaponNames.TryGetValue(wType, out name)) name = "Weapon " + wType;
-            int clip = GameData.ReadIntAbs(weapPtr + (long)cfg.WeaponClipOffset);
-            int total = GameData.ReadIntAbs(weapPtr + (long)cfg.WeaponTotalOffset);
-            int ammo = (clip > 0 ? clip : total);
+            if (!WeaponNames.TryGetValue(w, out name)) name = "Weapon " + w;
+            int ammo = GameData.ReadIntAbs(ped + (long)cfg.WeaponAmmoOffset);
             string line = cfg.WeaponText.Replace("{weapon}", name).Replace("{ammo}", ammo < 0 ? "?" : ammo.ToString());
             return line;
         }
